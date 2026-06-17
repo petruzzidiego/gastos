@@ -600,24 +600,16 @@ function movimientos() {
   const wrap = h('div');
   let filterType='todos', filterMonth=monthKey();
 
-  // Incluye TODOS los movimientos (pendingCard también), excepto los pares de transferencia duplicados
-  const allMovs = () => DB.movements.filter(m => !m.isTransfer || m.type==='gasto');
-
-  const months = [...new Set(DB.movements.map(m=>m.date?.slice(0,7)).filter(Boolean))].sort().reverse();
+  const months = [...new Set(realMovs().map(m=>m.date?.slice(0,7)))].sort().reverse();
   if(!months.includes(monthKey())) months.unshift(monthKey());
 
   function renderList() {
     listWrap.innerHTML='';
-    const filtered = allMovs()
-      .filter(m => {
-        if(!m.date?.startsWith(filterMonth)) return false;
-        if(filterType==='todos') return true;
-        return m.type===filterType;
-      })
-      .sort((a,b)=> b.date.localeCompare(a.date) || (b.id||'').localeCompare(a.id||''));
-
-    const totalIn  = filtered.filter(m=>m.type==='ingreso'&&!m.pendingCard).reduce((s,m)=>s+m.amount,0);
-    const totalOut = filtered.filter(m=>m.type==='gasto').reduce((s,m)=>s+m.amount,0);
+    const filtered=[...DB.movements.filter(m=>!m.pendingCard)]
+      .filter(m=>(filterType==='todos'||m.type===filterType||(filterType==='todos'&&m.isTransfer))&&m.date?.startsWith(filterMonth))
+      .sort((a,b)=>b.date.localeCompare(a.date));
+    const totalIn=filtered.filter(m=>m.type==='ingreso').reduce((s,m)=>s+m.amount,0);
+    const totalOut=filtered.filter(m=>m.type==='gasto').reduce((s,m)=>s+m.amount,0);
 
     // Stats
     const sr=h('div',{class:'stat-row'});
@@ -628,64 +620,29 @@ function movimientos() {
     });
     listWrap.appendChild(sr);
 
-    if(filtered.length===0){ listWrap.appendChild(makeCard(h('div',{class:'empty'},'Sin movimientos'))); return; }
+    if(filtered.length===0) { listWrap.appendChild(makeCard(h('div',{class:'empty'},'Sin movimientos'))); return; }
 
-    // Agrupar por fecha
-    const byDate = {};
-    filtered.forEach(m=>{ const d=m.date; if(!byDate[d]) byDate[d]=[]; byDate[d].push(m); });
-    const sortedDates = Object.keys(byDate).sort().reverse();
-
-    sortedDates.forEach(date=>{
-      // Separador de fecha
-      const dayMovs = byDate[date];
-      const dayTotal = dayMovs.reduce((s,m)=>s+(m.type==='ingreso'?m.amount:-m.amount),0);
-      const sep=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 2px 4px',marginTop:'4px'}});
-      sep.innerHTML=`<span style="font-size:11px;font-weight:700;color:${G.muted};text-transform:uppercase;letter-spacing:.6px">${fmtDate(date)}</span>
-        <span class="mono" style="font-size:11px;font-weight:700;color:${dayTotal>=0?G.green:G.red}">${dayTotal>=0?'+':''}${fmt(Math.abs(dayTotal))}</span>`;
-      listWrap.appendChild(sep);
-
-      dayMovs.forEach(m => {
-        const cat=DB.categories.find(c=>c.id===m.categoryId);
-        const card=DB.cards.find(c=>c.id===m.cardId);
-        const acc=DB.accounts.find(a=>a.id===m.accountId);
-        const isPending=!!m.pendingCard;
-
-        const row=h('div',{class:'mov-row'});
-        const meta=h('div',{class:'mov-meta'});
-        if(cat) meta.appendChild(makeTag(cat.name,cat.color));
-        if(card){
-          const cardTag=makeTag(card.name.split(' ')[0],card.color);
-          if(isPending) cardTag.style.opacity='0.7';
-          meta.appendChild(cardTag);
-        }
-        if(acc) meta.appendChild(makeTag(acc.name,acc.color));
-        if(isPending){
-          const pendTag=h('span',{class:'tag',style:{background:G.yellowDim,color:G.yellow,border:`1px solid ${G.yellow}44`}},'⏳ pendiente');
-          meta.appendChild(pendTag);
-        }
-        if(m.isTransfer){
-          const tTag=h('span',{class:'tag',style:{background:G.blueDim,color:G.blue,border:`1px solid ${G.blue}44`}},'🔄 transferencia');
-          meta.appendChild(tTag);
-        }
-
-        const iconBg = isPending ? G.yellowDim : (cat?.color||G.muted)+'18';
-        row.appendChild(h('div',{class:'mov-icon',style:{background:iconBg,opacity:isPending?'0.8':'1'}},cat?.icon||'📦'));
-
-        const info=h('div',{class:'mov-info'},[h('div',{class:'mov-name',style:{color:isPending?G.muted:G.text}},m.description||cat?.name||'Sin cat.'),meta]);
-        row.appendChild(info);
-
-        const right=h('div',{style:{display:'flex',alignItems:'center',gap:'6px',flexShrink:0}});
-        const amtColor = m.type==='ingreso' ? G.green : (isPending ? G.yellow : G.red);
-        right.appendChild(h('div',{class:'mono mov-amount',style:{color:amtColor}},`${m.type==='ingreso'?'+':'-'}${fmt(m.amount,m.currency)}`));
-
-        if(!isPending){
-          const editB=h('button',{style:{width:'26px',height:'26px',borderRadius:'7px',border:`1.5px solid ${G.border}`,fontSize:'12px',display:'flex',alignItems:'center',justifyContent:'center',background:G.accentDim,color:G.accent},onClick:()=>openEditMovForm(m,renderList)},'✏️');
-          right.appendChild(editB);
-          right.appendChild(makeDelBtn(()=>{ delMovimiento(m.id); renderList(); }));
-        }
-        row.appendChild(right);
-        listWrap.appendChild(makeCard(row));
-      });
+    filtered.forEach(m => {
+      const cat=DB.categories.find(c=>c.id===m.categoryId);
+      const card=DB.cards.find(c=>c.id===m.cardId);
+      const acc=DB.accounts.find(a=>a.id===m.accountId);
+      const row=h('div',{class:'mov-row'});
+      const meta=h('div',{class:'mov-meta'});
+      meta.appendChild(document.createTextNode(fmtDate(m.date)+' '));
+      if(cat) meta.appendChild(makeTag(cat.name,cat.color));
+      if(card) meta.appendChild(makeTag(card.name.split(' ')[0],card.color));
+      if(acc) meta.appendChild(makeTag(acc.name,acc.color));
+      row.appendChild(h('div',{class:'mov-icon',style:{background:(cat?.color||G.muted)+'18'}},cat?.icon||'📦'));
+      const info=h('div',{class:'mov-info'},[h('div',{class:'mov-name'},m.description||cat?.name||'Sin cat.'),meta]);
+      row.appendChild(info);
+      const right=h('div',{style:{display:'flex',alignItems:'center',gap:'6px',flexShrink:0}});
+      right.appendChild(h('div',{class:'mono mov-amount',style:{color:m.type==='ingreso'?G.green:G.red}},`${m.type==='ingreso'?'+':'-'}${fmt(m.amount,m.currency)}`));
+      const editB=h('button',{style:{width:'26px',height:'26px',borderRadius:'7px',border:`1.5px solid ${G.border}`,fontSize:'12px',display:'flex',alignItems:'center',justifyContent:'center',background:G.accentDim,color:G.accent},onClick:()=>openEditMovForm(m,renderList)},'✏️');
+      right.appendChild(editB);
+      right.appendChild(makeDelBtn(()=>{ delMovimiento(m.id); renderList(); }));
+      row.appendChild(right);
+      const c=makeCard(row);
+      listWrap.appendChild(c);
     });
   }
 
@@ -2590,7 +2547,8 @@ function openBackupModal() {
     style:{fontSize:'14px',padding:'12px',background:G.redDim,color:G.red,border:`2px solid ${G.red}44`,borderRadius:'11px'},
     onClick:()=>{
       if(!confirm('⚠️ ¿Borrar TODOS los datos y empezar de cero?\n\nEsto no se puede deshacer. Asegurate de haber exportado el backup antes.')) return;
-      localStorage.removeItem('finanzas_db');
+      localStorage.removeItem(KEY);
+      localStorage.removeItem('finanzas_db'); // legacy
       closeModal();
       location.reload();
     }
