@@ -897,25 +897,35 @@ function openEditMovForm(original, onSave) {
   openModal('Editar movimiento',body);
 }
 
-// ─── TARJETAS & CUENTAS ────────────────────────────────────────────────────── de cierre de una tarjeta para un mes dado
-function getCardPeriod(card, refDate) {
-  const ref = refDate ? new Date(refDate) : new Date();
-  const year = ref.getFullYear();
-  const month = ref.getMonth();
-  const closingDay = card.closingDay || 20;
-
-  // El período cierra el día closingDay de este mes
-  // y abarca desde el closingDay+1 del mes anterior hasta el closingDay de este mes
-  const periodEnd = new Date(year, month, closingDay);
-  const periodStart = new Date(year, month - 1, closingDay + 1);
-
+// ─── TARJETAS & CUENTAS ──────────────────────────────────────────────────────
+// periodKey "YYYY-MM" → período al que se imputa una compra según día de cierre
+function _imputPK(card, dateStr) {
+  const cd=card.closingDay||20, d=new Date(dateStr+'T12:00:00');
+  let y=d.getFullYear(), m=d.getMonth()+1;
+  if(d.getDate()>cd){m++;if(m>12){m=1;y++;}}
+  return `${y}-${String(m).padStart(2,'0')}`;
+}
+function _buildPeriod(card, pk) {
+  const [y,m]=pk.split('-').map(Number), cd=card.closingDay||20, dd=card.dueDay||10;
   return {
-    start: periodStart.toISOString().split('T')[0],
-    end: periodEnd.toISOString().split('T')[0],
-    label: monthLabel(monthKey(ref)),
-    periodKey: `${year}-${String(month+1).padStart(2,'0')}`
+    start: new Date(y,m-2,cd+1).toISOString().split('T')[0],
+    end:   new Date(y,m-1,cd).toISOString().split('T')[0],
+    dueDate: new Date(y,m,dd).toISOString().split('T')[0],
+    label: monthLabel(pk), periodKey: pk
   };
 }
+function getCardPeriod(card, refDate) {
+  const ref=refDate?new Date(refDate+'T12:00:00'):new Date(), cd=card.closingDay||20;
+  let y=ref.getFullYear(), m=ref.getMonth()+1;
+  if(ref.getDate()>cd){m++;if(m>12){m=1;y++;}}
+  return _buildPeriod(card,`${y}-${String(m).padStart(2,'0')}`);
+}
+function _movPK(mov){
+  if(mov.imputPeriod) return mov.imputPeriod;
+  const card=DB.cards.find(c=>c.id===mov.cardId);
+  return card?_imputPK(card,mov.date):mov.date.slice(0,7);
+}
+const _cnav={};   // navegación de período por card.id
 
 function tarjetas() {
   const wrap=h('div');
@@ -929,166 +939,147 @@ function tarjetas() {
     if(subTab==='tarjetas') {
       if(DB.cards.length===0) listArea.appendChild(makeCard(h('div',{class:'empty'},'Aún no tenés tarjetas. ¡Agregá la primera!')));
       DB.cards.forEach(card=>{
-        const period = getCardPeriod(card);
-        // Gastos del período actual (cuotas que caen en este período)
-        const periodMovs = DB.movements.filter(m=>
-          m.cardId===card.id && m.type==='gasto' &&
-          m.date >= period.start && m.date <= period.end
-        );
-        const periodTotal = periodMovs.reduce((s,m)=>s+m.amount,0);
-        // Cuotas futuras (más allá del cierre)
-        const futureInstallments = DB.movements.filter(m=>m.cardId===card.id&&m.type==='gasto'&&m.date>period.end);
-        const futurePending = futureInstallments.reduce((s,m)=>s+m.amount,0);
-        // ¿Ya se pagó este resumen?
-        const alreadyPaid = DB.cardPayments?.some(p=>p.cardId===card.id&&p.periodKey===period.periodKey);
+        const curPK=getCardPeriod(card).periodKey;
+        if(!_cnav[card.id]) _cnav[card.id]=curPK;
+        const viewPK=_cnav[card.id];
+        const period=_buildPeriod(card,viewPK);
+
+        const periodMovs=DB.movements.filter(m=>m.cardId===card.id&&m.type==='gasto'&&_movPK(m)===viewPK);
+        const periodTotal=periodMovs.reduce((s,m)=>s+m.amount,0);
+
+        const futureMap={};
+        DB.movements.filter(m=>m.cardId===card.id&&m.type==='gasto').forEach(m=>{
+          const ip=_movPK(m); if(ip>curPK){if(!futureMap[ip])futureMap[ip]=[]; futureMap[ip].push(m);}
+        });
+        const futurePending=Object.values(futureMap).flat().reduce((s,m)=>s+m.amount,0);
+
+        const alreadyPaid=DB.cardPayments?.some(p=>p.cardId===card.id&&p.periodKey===viewPK&&!p.closedOnly);
+        const alreadyClosed=!alreadyPaid&&DB.cardPayments?.some(p=>p.cardId===card.id&&p.periodKey===viewPK&&p.closedOnly);
         const pct=card.limit?Math.min(periodTotal/card.limit*100,100):0;
 
         const c=h('div',{class:'card card-pad',style:{marginBottom:'12px',border:`1.5px solid ${card.color}33`,position:'relative',overflow:'hidden'}});
-        const delB=makeDelBtn(()=>{ DB.cards=DB.cards.filter(x=>x.id!==card.id); saveDB(DB); renderSub(); });
-        const editB=h('button',{style:{width:'28px',height:'28px',borderRadius:'8px',border:`1.5px solid ${card.color}44`,fontSize:'13px',display:'flex',alignItems:'center',justifyContent:'center',background:card.color+'14',color:card.color,cursor:'pointer'},onClick:()=>openEditCardForm(card,renderSub)},'✏️');
+        c.appendChild(h('div',{style:{position:'absolute',top:'-25px',right:'-25px',width:'100px',height:'100px',borderRadius:'50%',background:`${card.color}0f`}}));
 
-        // Header
-        const header=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:'14px',position:'relative',zIndex:1}});
-        header.innerHTML=`<div><div style="font-weight:800;font-size:17px;color:${card.color}">${card.name}</div>
-          <div style="font-size:11px;color:${G.muted};margin-top:2px">${card.currency}${card.closingDay?` · Cierre día ${card.closingDay} · Vence día ${card.dueDay}`:''}</div></div>`;
-        const btnGroup=h('div',{style:{display:'flex',gap:'6px',alignItems:'center'}});
-        btnGroup.append(editB,delB);
-        header.appendChild(btnGroup);
+        // ── Header ──
+        const hdr=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:'10px',position:'relative',zIndex:1}});
+        const hdrL=h('div');
+        hdrL.innerHTML=`<div style="font-weight:800;font-size:17px;color:${card.color}">${card.name}</div>
+          <div style="font-size:11px;color:${G.muted};margin-top:2px">${card.currency}${card.closingDay?` · Cierre día ${card.closingDay} · Vence día ${card.dueDay}`:''}</div>`;
+        const hdrR=h('div',{style:{display:'flex',gap:'6px'}});
+        hdrR.appendChild(h('button',{style:{width:'28px',height:'28px',borderRadius:'8px',border:`1.5px solid ${card.color}44`,fontSize:'13px',display:'flex',alignItems:'center',justifyContent:'center',background:card.color+'14',color:card.color,cursor:'pointer'},onClick:()=>openEditCardForm(card,renderSub)},'✏️'));
+        hdrR.appendChild(makeDelBtn(()=>{DB.cards=DB.cards.filter(x=>x.id!==card.id);saveDB(DB);renderSub();}));
+        hdr.append(hdrL,hdrR); c.appendChild(hdr);
 
-        // Decoración de fondo
-        const bg=h('div',{style:{position:'absolute',top:'-25px',right:'-25px',width:'100px',height:'100px',borderRadius:'50%',background:`${card.color}0f`}});
+        // ── Navegación ‹ Mes › ──
+        const isLatest=viewPK>=curPK;
+        const navRow=h('div',{style:{display:'flex',alignItems:'center',gap:'6px',marginBottom:'10px'}});
+        const pBtn=h('button',{style:{width:'32px',height:'32px',borderRadius:'8px',border:`1.5px solid ${card.color}33`,background:card.color+'10',color:card.color,fontSize:'18px',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}},'‹');
+        const nBtn=h('button',{style:{width:'32px',height:'32px',borderRadius:'8px',border:`1.5px solid ${card.color}33`,background:card.color+'10',color:card.color,fontSize:'18px',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,opacity:isLatest?'0.3':'1',cursor:isLatest?'default':'pointer'}},'›');
+        const stag=alreadyPaid?`<span style="background:${G.greenDim};color:${G.green};border:1px solid ${G.green}44;border-radius:5px;padding:1px 7px;font-size:10px;font-weight:700;margin-left:5px">✓ Pagado</span>`
+          :alreadyClosed?`<span style="background:${G.yellowDim};color:${G.yellow};border:1px solid ${G.yellow}44;border-radius:5px;padding:1px 7px;font-size:10px;font-weight:700;margin-left:5px">🔒 Cerrado</span>`
+          :viewPK===curPK?`<span style="background:${card.color}14;color:${card.color};border-radius:5px;padding:1px 7px;font-size:10px;font-weight:700;margin-left:5px">Actual</span>`:'';
+        const pLbl=h('div',{style:{flex:1,textAlign:'center'}});
+        pLbl.innerHTML=`<div style="font-size:13px;font-weight:800;color:${card.color}">${period.label}${stag}</div>
+          <div style="font-size:10px;color:${G.muted};margin-top:1px">${fmtDate(period.start)} → ${fmtDate(period.end)}</div>`;
+        pBtn.onclick=()=>{const[y,m]=viewPK.split('-').map(Number),d=new Date(y,m-2,1);_cnav[card.id]=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;renderSub();};
+        nBtn.onclick=()=>{if(isLatest)return;const[y,m]=viewPK.split('-').map(Number),d=new Date(y,m,1);_cnav[card.id]=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;renderSub();};
+        navRow.append(pBtn,pLbl,nBtn); c.appendChild(navRow);
 
-        c.appendChild(bg);
-        c.appendChild(header);
-
-        // Resumen del período
-        const dueDateKey=`dueDate_${card.id}_${period.periodKey}`;
-        const savedDueDate=DB.cardDueDates?.[dueDateKey]||'';
-        const resumenPeriod=h('div',{style:{background:`${card.color}0a`,border:`1px solid ${card.color}22`,borderRadius:'12px',padding:'12px',marginBottom:'10px'}});
-        resumenPeriod.innerHTML=`
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <span style="font-size:11px;font-weight:700;color:${card.color};text-transform:uppercase;letter-spacing:.5px">📋 Resumen ${period.label}</span>
-            ${alreadyPaid?`<span style="font-size:11px;background:${G.greenDim};color:${G.green};border:1px solid ${G.green}33;border-radius:6px;padding:2px 8px;font-weight:700">✓ Pagado</span>`:''}
-          </div>
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <span style="font-size:12px;color:${G.textSoft}">${periodMovs.length} mov · del ${fmtDate(period.start)} al ${fmtDate(period.end)}</span>
-            <span class="mono" style="font-size:20px;font-weight:700;color:${card.color}">${fmt(periodTotal)}</span>
-          </div>`;
-
-        // Fecha de vencimiento editable del período
-        const dueDateRow=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',marginTop:'10px',paddingTop:'8px',borderTop:`1px solid ${card.color}22`}});
-        dueDateRow.innerHTML=`<span style="font-size:11px;color:${G.muted};font-weight:600;flex-shrink:0">📅 Vence:</span>`;
-        const dueDateInp=h('input',{type:'date',value:savedDueDate,style:{flex:1,border:`1.5px solid ${card.color}33`,borderRadius:'8px',padding:'4px 8px',fontSize:'12px',color:G.text,background:'#fff',fontFamily:'inherit'}});
-        dueDateInp.onchange=e=>{
-          if(!DB.cardDueDates) DB.cardDueDates={};
-          DB.cardDueDates[dueDateKey]=e.target.value;
-          saveDB(DB);
-        };
-        dueDateRow.appendChild(dueDateInp);
-        if(savedDueDate) {
-          const diff=Math.ceil((new Date(savedDueDate)-new Date())/86400000);
-          const badge=h('span',{style:{fontSize:'11px',fontWeight:700,color:diff<=3?G.red:G.yellow,background:diff<=3?G.redDim:G.yellowDim,borderRadius:'6px',padding:'3px 7px',flexShrink:0}});
-          badge.textContent=diff<=0?'¡Vencida!':diff===1?'Mañana':`En ${diff}d`;
-          dueDateRow.appendChild(badge);
-          // Botón Google Calendar con alerta 1 día antes
-          const dayBefore=new Date(savedDueDate); dayBefore.setDate(dayBefore.getDate()-1);
-          const alertDate=dayBefore.toISOString().split('T')[0].replace(/-/g,'');
-          const gcalText=encodeURIComponent(`💳 Pagar ${card.name} - ${period.label}`);
-          const gcalDetail=encodeURIComponent(`Total resumen: ${fmt(periodTotal,card.currency)}\nPeriodo: ${fmtDate(period.start)} al ${fmtDate(period.end)}\n\nRecordá retirar fondos si necesitás.`);
-          const gcalDate=savedDueDate.replace(/-/g,'');
-          const gcBtn=h('a',{
-            href:`https://calendar.google.com/calendar/render?action=TEMPLATE&text=${gcalText}&dates=${gcalDate}/${gcalDate}&details=${gcalDetail}`,
-            target:'_blank',
-            style:{background:G.blueDim,border:`1.5px solid ${G.blue}44`,borderRadius:'7px',padding:'4px 8px',color:G.blue,fontSize:'11px',fontWeight:700,textDecoration:'none',flexShrink:0,whiteSpace:'nowrap'}
-          },'📅 Cal');
-          dueDateRow.appendChild(gcBtn);
-        }
-        resumenPeriod.appendChild(dueDateRow);
-
-        if(card.limit>0) {
-          resumenPeriod.innerHTML+=`<div style="display:flex;justify-content:space-between;margin-top:8px;margin-bottom:4px"><span style="font-size:10px;color:${G.muted}">Límite utilizado</span><span class="mono" style="font-size:10px;color:${pct>80?G.red:G.muted};font-weight:600">${Math.round(pct)}% de ${fmt(card.limit)}</span></div>
+        // ── Resumen box ──
+        const resBox=h('div',{style:{background:`${card.color}0a`,border:`1px solid ${card.color}22`,borderRadius:'12px',padding:'12px',marginBottom:'10px'}});
+        resBox.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-size:12px;color:${G.textSoft}">${periodMovs.length} gasto${periodMovs.length!==1?'s':''}</span>
+          <span class="mono" style="font-size:22px;font-weight:700;color:${card.color}">${fmt(periodTotal,card.currency)}</span></div>`;
+        if(card.limit>0){
+          resBox.innerHTML+=`<div style="display:flex;justify-content:space-between;margin-bottom:3px"><span style="font-size:10px;color:${G.muted}">Límite utilizado</span><span class="mono" style="font-size:10px;color:${pct>80?G.red:G.muted};font-weight:600">${Math.round(pct)}% de ${fmt(card.limit)}</span></div>
           <div class="progress-bg"><div class="progress-fill" style="width:${pct}%;background:${pct>80?G.red:card.color}"></div></div>`;
         }
-        c.appendChild(resumenPeriod);
 
-        // Lista de gastos del período (colapsable)
-        if(periodMovs.length>0) {
-          const detailWrap=h('div',{style:{marginBottom:'10px',display:'none'}});
-          periodMovs.sort((a,b)=>a.date.localeCompare(b.date)).forEach(m=>{
-            const cat=DB.categories.find(x=>x.id===m.categoryId);
-            const row=h('div',{style:{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:`1px solid ${G.border}`,fontSize:'12px'}});
-            row.innerHTML=`<span style="color:${G.textSoft}">${cat?.icon||'📦'} ${m.description||cat?.name||'Gasto'}</span>
-              <div style="text-align:right"><span class="mono" style="font-weight:600;color:${G.red}">${fmt(m.amount)}</span><span style="display:block;font-size:10px;color:${G.muted}">${fmtDate(m.date)}</span></div>`;
-            detailWrap.appendChild(row);
-          });
-          const toggleBtn=h('button',{style:{fontSize:'11px',color:card.color,fontWeight:700,background:'none',border:'none',marginBottom:'8px',cursor:'pointer'}},`▶ Ver ${periodMovs.length} gastos del período`);
-          let open=false;
-          toggleBtn.onclick=()=>{ open=!open; detailWrap.style.display=open?'block':'none'; toggleBtn.textContent=`${open?'▼':'▶'} ${open?'Ocultar':'Ver'} ${periodMovs.length} gastos del período`; };
-          c.appendChild(toggleBtn);
-          c.appendChild(detailWrap);
+        // Fecha de vencimiento — auto-calculada desde dueDay, editable
+        const dueKey=`dueDate_${card.id}_${viewPK}`;
+        const autoDue=period.dueDate;
+        if(!DB.cardDueDates) DB.cardDueDates={};
+        const savedDue=DB.cardDueDates[dueKey]||autoDue||'';
+        if(!DB.cardDueDates[dueKey]&&autoDue){DB.cardDueDates[dueKey]=autoDue;saveDB(DB);}
+
+        const vRow=h('div',{style:{display:'flex',alignItems:'center',gap:'7px',marginTop:'8px',paddingTop:'8px',borderTop:`1px solid ${card.color}22`,flexWrap:'wrap'}});
+        vRow.innerHTML=`<span style="font-size:11px;color:${G.muted};font-weight:600;flex-shrink:0">📅 Vence:</span>`;
+        const dInp=h('input',{type:'date',value:savedDue,style:{flex:1,minWidth:'110px',border:`1.5px solid ${card.color}33`,borderRadius:'8px',padding:'4px 8px',fontSize:'12px',color:G.text,background:'#fff',fontFamily:'inherit'}});
+        dInp.onchange=e=>{DB.cardDueDates[dueKey]=e.target.value;saveDB(DB);renderSub();};
+        vRow.appendChild(dInp);
+        if(savedDue){
+          const diff=Math.ceil((new Date(savedDue+'T12:00:00')-new Date())/86400000);
+          const badge=h('span',{style:{fontSize:'11px',fontWeight:700,color:diff<=3?G.red:G.yellow,background:diff<=3?G.redDim:G.yellowDim,borderRadius:'6px',padding:'3px 7px',flexShrink:0}});
+          badge.textContent=diff<0?'¡Vencida!':diff===0?'¡Hoy!':diff===1?'Mañana':`En ${diff}d`;
+          vRow.appendChild(badge);
+          const gcD=savedDue.replace(/-/g,''),gcT=encodeURIComponent(`💳 Pagar ${card.name} - ${period.label}`),gcDet=encodeURIComponent(`Total: ${fmt(periodTotal,card.currency)}\nPeríodo: ${fmtDate(period.start)} al ${fmtDate(period.end)}`);
+          vRow.appendChild(h('a',{href:`https://calendar.google.com/calendar/render?action=TEMPLATE&text=${gcT}&dates=${gcD}/${gcD}&details=${gcDet}`,target:'_blank',style:{background:G.blueDim,border:`1.5px solid ${G.blue}44`,borderRadius:'7px',padding:'4px 8px',color:G.blue,fontSize:'11px',fontWeight:700,textDecoration:'none',flexShrink:0}},'📅 Cal'));
         }
+        resBox.appendChild(vRow);
+        c.appendChild(resBox);
 
-        // Botón pagar resumen
-        if(!alreadyPaid && periodTotal>0) {
-          const payBtn=h('button',{
-            style:{width:'100%',background:`linear-gradient(135deg,${card.color},${card.color}cc)`,color:'#fff',border:'none',borderRadius:'11px',padding:'12px',fontWeight:800,fontSize:'14px',cursor:'pointer',boxShadow:`0 3px 12px ${card.color}44`},
-            onClick:()=>openPagarResumen(card, periodMovs, periodTotal, period, renderSub)
-          },'💳 Pagar resumen → registrar gastos');
-          c.appendChild(payBtn);
-        }
-
-        // Cuotas futuras — detalle por mes colapsable
-        if(futurePending>0) {
-          const futureDiv=h('div',{style:{background:G.yellowDim,borderRadius:'9px',padding:'10px 12px',marginTop:'10px'}});
-          // Agrupar por mes
-          const byMonth={};
-          futureInstallments.forEach(m=>{ const mk=m.date.slice(0,7); if(!byMonth[mk])byMonth[mk]=[]; byMonth[mk].push(m); });
-          const totalMeses=Object.keys(byMonth).length;
-
-          const futureHeader=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'4px'}});
-          futureHeader.innerHTML=`<span style="font-size:12px;color:${G.yellow};font-weight:700">⏳ Cuotas próximas</span>
-            <span class="mono" style="font-size:13px;color:${G.yellow};font-weight:700">${fmt(futurePending)}</span>`;
-          futureDiv.appendChild(futureHeader);
-
-          const futureDetail=h('div',{style:{display:'none',marginTop:'8px'}});
-          Object.entries(byMonth).sort(([a],[b])=>a.localeCompare(b)).forEach(([mk,movs])=>{
-            const mkTotal=movs.reduce((s,m)=>s+m.amount,0);
-            const monthBlock=h('div',{style:{marginBottom:'8px',paddingBottom:'8px',borderBottom:`1px solid ${G.yellow}33`}});
-            const monthHeader=h('div',{style:{display:'flex',justifyContent:'space-between',marginBottom:'4px'}});
-            monthHeader.innerHTML=`<span style="font-size:12px;font-weight:700;color:${G.textSoft}">${monthLabel(mk)}</span>
-              <span class="mono" style="font-size:12px;font-weight:700;color:${G.yellow}">${fmt(mkTotal)}</span>`;
-            monthBlock.appendChild(monthHeader);
-            movs.forEach(m=>{
+        // ── Lista de gastos editable ──
+        if(periodMovs.length>0){
+          const detWrap=h('div',{style:{display:'none',marginBottom:'8px'}});
+          function renderDet(){
+            detWrap.innerHTML='';
+            [...periodMovs].sort((a,b)=>a.date.localeCompare(b.date)).forEach(m=>{
               const cat=DB.categories.find(x=>x.id===m.categoryId);
-              const mrow=h('div',{style:{display:'flex',justifyContent:'space-between',fontSize:'11px',color:G.muted,padding:'2px 0'}});
-              mrow.innerHTML=`<span>${cat?.icon||'📦'} ${m.description||cat?.name||'Gasto'}</span>
-                <span class="mono" style="font-weight:600">${fmt(m.amount)}</span>`;
-              monthBlock.appendChild(mrow);
+              const row=h('div',{style:{display:'flex',alignItems:'center',gap:'6px',padding:'7px 0',borderBottom:`1px solid ${G.border}`}});
+              const info=h('div',{style:{flex:1,minWidth:0}});
+              info.innerHTML=`<div style="font-size:12px;font-weight:600;color:${G.textSoft};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${cat?.icon||'📦'} ${m.description||cat?.name||'Gasto'}</div>
+                <div style="font-size:10px;color:${G.muted}">${fmtDate(m.date)}</div>`;
+              const right=h('div',{style:{display:'flex',alignItems:'center',gap:'5px',flexShrink:0}});
+              right.innerHTML=`<span class="mono" style="font-size:13px;font-weight:700;color:${G.red}">${fmt(m.amount,m.currency||card.currency)}</span>`;
+              if(!alreadyPaid){
+                right.appendChild(h('button',{style:{width:'26px',height:'26px',borderRadius:'7px',border:`1.5px solid ${card.color}44`,fontSize:'12px',display:'flex',alignItems:'center',justifyContent:'center',background:card.color+'14',color:card.color,cursor:'pointer'},onClick:()=>openEditCardMov(m,card,renderSub)},'✏️'));
+                right.appendChild(h('button',{style:{width:'26px',height:'26px',borderRadius:'7px',border:`1.5px solid ${G.red}44`,fontSize:'12px',display:'flex',alignItems:'center',justifyContent:'center',background:G.redDim,color:G.red,cursor:'pointer'},onClick:()=>{if(!confirm(`¿Borrar "${m.description||'gasto'}"?`))return;DB.movements=DB.movements.filter(x=>x.id!==m.id);saveDB(DB);renderSub();}},'✕'));
+              }
+              row.append(info,right); detWrap.appendChild(row);
             });
-            futureDetail.appendChild(monthBlock);
-          });
-
-          const toggleFuture=h('button',{style:{fontSize:'11px',color:G.yellow,fontWeight:700,background:'none',border:'none',cursor:'pointer',width:'100%',textAlign:'left',marginTop:'2px'}},`▶ Ver detalle (${futureInstallments.length} cuotas en ${totalMeses} meses)`);
-          let futureOpen=false;
-          toggleFuture.onclick=()=>{ futureOpen=!futureOpen; futureDetail.style.display=futureOpen?'block':'none'; toggleFuture.textContent=`${futureOpen?'▼':'▶'} ${futureOpen?'Ocultar detalle':'Ver detalle'} (${futureInstallments.length} cuotas en ${totalMeses} meses)`; };
-          futureDiv.appendChild(toggleFuture);
-          futureDiv.appendChild(futureDetail);
-          c.appendChild(futureDiv);
+          }
+          renderDet();
+          const togBtn=h('button',{style:{fontSize:'11px',color:card.color,fontWeight:700,background:'none',border:'none',marginBottom:'6px',cursor:'pointer'}},`▶ Ver ${periodMovs.length} gastos`);
+          let detOpen=false;
+          togBtn.onclick=()=>{detOpen=!detOpen;detWrap.style.display=detOpen?'block':'none';togBtn.textContent=`${detOpen?'▼':'▶'} ${detOpen?'Ocultar':'Ver'} ${periodMovs.length} gastos`;};
+          c.appendChild(togBtn); c.appendChild(detWrap);
         }
 
-        const footer=h('div',{style:{fontSize:'11px',color:G.muted,marginTop:'10px',paddingTop:'8px',borderTop:`1px solid ${G.border}`}});
-        footer.textContent=`${DB.movements.filter(m=>m.cardId===card.id).length} movimientos totales`;
-        c.appendChild(footer);
+        // ── Acciones ──
+        if(!alreadyPaid&&periodTotal>0){
+          const actRow=h('div',{style:{display:'flex',gap:'8px',marginTop:'4px'}});
+          if(!alreadyClosed){
+            actRow.appendChild(h('button',{style:{flex:1,background:G.yellowDim,color:G.yellow,border:`1.5px solid ${G.yellow}55`,borderRadius:'10px',padding:'10px',fontWeight:700,fontSize:'13px',cursor:'pointer'},onClick:()=>openCerrarPeriodo(card,periodMovs,periodTotal,period,renderSub)},'🔒 Cerrar'));
+          }
+          actRow.appendChild(h('button',{style:{flex:2,background:`linear-gradient(135deg,${card.color},${card.color}cc)`,color:'#fff',border:'none',borderRadius:'10px',padding:'10px',fontWeight:800,fontSize:'13px',cursor:'pointer',boxShadow:`0 3px 12px ${card.color}44`},onClick:()=>openPagarResumen(card,periodMovs,periodTotal,period,renderSub)},'💳 Pagar resumen'));
+          c.appendChild(actRow);
+        }
 
+        // ── Cuotas futuras ──
+        if(futurePending>0){
+          const futDiv=h('div',{style:{background:G.yellowDim,borderRadius:'9px',padding:'10px 12px',marginTop:'10px'}});
+          const futKeys=Object.keys(futureMap).sort();
+          futDiv.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><span style="font-size:12px;color:${G.yellow};font-weight:700">⏳ Próximos ${futKeys.length} resúmenes</span><span class="mono" style="font-size:13px;color:${G.yellow};font-weight:700">${fmt(futurePending,card.currency)}</span></div>`;
+          const futDet=h('div',{style:{display:'none',marginTop:'8px'}});
+          futKeys.forEach(pk=>{
+            const movs=futureMap[pk],pkT=movs.reduce((s,m)=>s+m.amount,0);
+            const blk=h('div',{style:{marginBottom:'8px',paddingBottom:'8px',borderBottom:`1px solid ${G.yellow}33`}});
+            blk.innerHTML=`<div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="font-size:12px;font-weight:700;color:${G.textSoft}">${monthLabel(pk)}</span><span class="mono" style="font-size:12px;font-weight:700;color:${G.yellow}">${fmt(pkT,card.currency)}</span></div>`;
+            movs.forEach(m=>{const cat=DB.categories.find(x=>x.id===m.categoryId);blk.innerHTML+=`<div style="display:flex;justify-content:space-between;font-size:11px;color:${G.muted};padding:2px 0"><span>${cat?.icon||'📦'} ${m.description||'Gasto'}</span><span class="mono">${fmt(m.amount,m.currency||card.currency)}</span></div>`;});
+            futDet.appendChild(blk);
+          });
+          const togF=h('button',{style:{fontSize:'11px',color:G.yellow,fontWeight:700,background:'none',border:'none',cursor:'pointer',width:'100%',textAlign:'left',marginTop:'2px'}},'▶ Ver detalle por resumen');
+          let fOpen=false;
+          togF.onclick=()=>{fOpen=!fOpen;futDet.style.display=fOpen?'block':'none';togF.textContent=fOpen?'▼ Ocultar detalle':'▶ Ver detalle por resumen';};
+          futDiv.append(togF,futDet); c.appendChild(futDiv);
+        }
+
+        c.appendChild(h('div',{style:{fontSize:'11px',color:G.muted,marginTop:'10px',paddingTop:'8px',borderTop:`1px solid ${G.border}`}},`${DB.movements.filter(m=>m.cardId===card.id).length} movimientos totales`));
         listArea.appendChild(c);
       });
 
-      // Botón agregar cuota / compra en cuotas existente
-      const addInstBtn=h('button',{class:'btn btn-ghost btn-full',style:{border:`2px dashed ${G.yellow}`,background:G.yellowDim,color:G.yellow,borderRadius:'14px',padding:'14px',marginBottom:'10px'},onClick:openInstallmentForm},'+ Cargar cuotas pendientes de tarjeta');
-      listArea.appendChild(addInstBtn);
-
-      const addBtn=h('button',{class:'btn btn-ghost btn-full',style:{border:`2px dashed ${G.accent}`,background:G.accentDim,color:G.accent,borderRadius:'14px',padding:'14px'},onClick:openCardForm},'+ Agregar tarjeta');
-      listArea.appendChild(addBtn);
+      listArea.appendChild(h('button',{class:'btn btn-ghost btn-full',style:{border:`2px dashed ${G.yellow}`,background:G.yellowDim,color:G.yellow,borderRadius:'14px',padding:'14px',marginBottom:'10px'},onClick:openInstallmentForm},'+ Cargar cuotas pendientes de tarjeta'));
+      listArea.appendChild(h('button',{class:'btn btn-ghost btn-full',style:{border:`2px dashed ${G.accent}`,background:G.accentDim,color:G.accent,borderRadius:'14px',padding:'14px'},onClick:openCardForm},'+ Agregar tarjeta'));
 
     } else if(subTab==='cuotas') {
       // ── Vista de grupos de cuotas ──────────────────────────────────────────
@@ -1667,6 +1658,67 @@ function tarjetas() {
   }
 
   return wrap;
+}
+
+// ── Editar un gasto individual de tarjeta ─────────────────────────────────
+function openEditCardMov(mov, card, onDone) {
+  let f={description:mov.description||'',amount:String(mov.amount),date:mov.date,currency:mov.currency||card.currency,categoryId:mov.categoryId||''};
+  const body=h('div');
+  function rb(){
+    body.innerHTML='';
+    const di=makeInput({type:'text',placeholder:'Descripción',value:f.description}); di.oninput=e=>f.description=e.target.value;
+    body.appendChild(makeField('Descripción',di));
+    const tc=h('div',{class:'two-col'});
+    const ai=makeInput({type:'number',placeholder:'0',value:f.amount}); ai.oninput=e=>f.amount=e.target.value;
+    tc.appendChild(h('div',{class:'col-2'},[makeField('Monto',ai)]));
+    tc.appendChild(makeField('Moneda',makeSelect([['ARS','ARS $'],['USD','USD $']],f.currency,v=>f.currency=v)));
+    body.appendChild(tc);
+    const dateInp=makeInput({type:'date',value:f.date}); dateInp.oninput=e=>f.date=e.target.value;
+    body.appendChild(makeField('Fecha de compra',dateInp));
+    const cats=DB.categories.filter(c=>c.type==='gasto'||c.type==='ambos');
+    const catField=h('div',{class:'field'},[h('label',{class:'field-label'},'Categoría')]);
+    const catGrid=h('div',{class:'cat-grid'});
+    cats.forEach(c=>{const btn=h('button',{class:'cat-pick-btn'+(f.categoryId===c.id?' selected':''),style:{color:c.color,background:f.categoryId===c.id?c.color+'18':'#f8fafc',borderColor:f.categoryId===c.id?c.color:G.border},onClick:()=>{f.categoryId=c.id;rb();}},`${c.icon} ${c.name}`);catGrid.appendChild(btn);});
+    catField.appendChild(catGrid); body.appendChild(catField);
+    const br=h('div',{class:'btn-row'});
+    br.appendChild(makeBtn('Cancelar',closeModal,'ghost'));
+    br.appendChild(makeBtn('Guardar',()=>{
+      if(!f.amount||!f.date)return;
+      const newIp=_imputPK(card,f.date);
+      DB.movements=DB.movements.map(x=>x.id===mov.id?{...x,description:f.description,amount:Number(f.amount),date:f.date,currency:f.currency,categoryId:f.categoryId,imputPeriod:newIp}:x);
+      saveDB(DB);closeModal();onDone();
+    },'primary',{full:true}));
+    body.appendChild(br);
+  }
+  rb();
+  openModal(`Editar gasto · ${card.name}`,body);
+}
+
+// ── Cerrar período sin pagar (congela el resumen) ─────────────────────────
+function openCerrarPeriodo(card, periodMovs, totalAmount, period, onDone) {
+  const body=h('div');
+  body.innerHTML=`<div style="text-align:center;margin-bottom:14px"><div style="font-size:32px;margin-bottom:6px">🔒</div>
+    <div style="font-weight:800;font-size:20px;color:${card.color}">${fmt(totalAmount,card.currency)}</div>
+    <div style="font-size:13px;color:${G.muted};margin-top:4px">Cerrar resumen ${period.label} · ${card.name}</div></div>
+    <div style="background:${G.yellowDim};border-radius:10px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:${G.yellow};line-height:1.6">
+    Cerrar el período congela el resumen: no entra ningún gasto más. Cuando lo pagues, usá el botón Pagar.</div>`;
+  const listBox=h('div',{style:{background:G.accentDim,borderRadius:'10px',padding:'10px 12px',marginBottom:'14px',maxHeight:'160px',overflowY:'auto'}});
+  listBox.innerHTML=`<div style="font-size:11px;font-weight:700;color:${G.accent};margin-bottom:6px;text-transform:uppercase">${periodMovs.length} gastos incluidos</div>`;
+  [...periodMovs].sort((a,b)=>a.date.localeCompare(b.date)).forEach(m=>{
+    const cat=DB.categories.find(x=>x.id===m.categoryId);
+    listBox.innerHTML+=`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid ${G.border};font-size:12px"><span style="color:${G.textSoft}">${cat?.icon||'📦'} ${m.description||'Gasto'}</span><span class="mono" style="font-weight:700;color:${G.red}">${fmt(m.amount,m.currency)}</span></div>`;
+  });
+  listBox.innerHTML+=`<div style="display:flex;justify-content:space-between;padding-top:7px;font-size:13px;font-weight:800"><span>Total</span><span class="mono" style="color:${card.color}">${fmt(totalAmount,card.currency)}</span></div>`;
+  body.appendChild(listBox);
+  const br=h('div',{class:'btn-row'});
+  br.appendChild(makeBtn('Cancelar',closeModal,'ghost'));
+  br.appendChild(makeBtn('🔒 Cerrar período',()=>{
+    if(!DB.cardPayments)DB.cardPayments=[];
+    DB.cardPayments.push({cardId:card.id,periodKey:period.periodKey,amount:totalAmount,closedAt:today(),closedOnly:true});
+    saveDB(DB);closeModal();onDone();
+  },'primary',{full:true}));
+  body.appendChild(br);
+  openModal(`Cerrar resumen ${card.name}`,body);
 }
 
 // ── Modal: confirmar pago de resumen de tarjeta ────────────────────────────
@@ -2547,8 +2599,7 @@ function openBackupModal() {
     style:{fontSize:'14px',padding:'12px',background:G.redDim,color:G.red,border:`2px solid ${G.red}44`,borderRadius:'11px'},
     onClick:()=>{
       if(!confirm('⚠️ ¿Borrar TODOS los datos y empezar de cero?\n\nEsto no se puede deshacer. Asegurate de haber exportado el backup antes.')) return;
-      localStorage.removeItem(KEY);
-      localStorage.removeItem('finanzas_db'); // legacy
+      localStorage.removeItem('finanzas_db');
       closeModal();
       location.reload();
     }
