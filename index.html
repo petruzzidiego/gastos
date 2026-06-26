@@ -545,113 +545,6 @@ function resumen() {
     });
     wrap.appendChild(invScr);
   }
-  // ── Resúmenes de tarjetas comprometidos ────────────────────────────────────
-  if(DB.cards.length>0) {
-    // Calcular los próximos N meses con actividad en tarjetas
-    const cardMonths={};
-    DB.movements.filter(m=>m.cardId&&m.type==='gasto').forEach(m=>{
-      // Imputar al período correcto según cierre de la tarjeta
-      const card=DB.cards.find(c=>c.id===m.cardId);
-      if(!card) return;
-      const cd=card.closingDay||20, d=new Date(m.date+'T12:00:00');
-      let y=d.getFullYear(), mo=d.getMonth()+1;
-      if(d.getDate()>cd){mo++;if(mo>12){mo=1;y++;}}
-      const pk=`${y}-${String(mo).padStart(2,'0')}`;
-      if(!cardMonths[pk]) cardMonths[pk]={};
-      if(!cardMonths[pk][card.id]) cardMonths[pk][card.id]={card,movs:[],paid:false,closed:false};
-      cardMonths[pk][card.id].movs.push(m);
-    });
-
-    // Marcar pagados/cerrados
-    (DB.cardPayments||[]).forEach(p=>{
-      if(cardMonths[p.periodKey]?.[p.cardId]){
-        if(p.closedOnly) cardMonths[p.periodKey][p.cardId].closed=true;
-        else cardMonths[p.periodKey][p.cardId].paid=true;
-      }
-    });
-
-    // Mostrar solo desde el mes actual en adelante (o el más reciente no pagado)
-    const todayPK=monthKey();
-    const relevantPKs=Object.keys(cardMonths)
-      .filter(pk=>{
-        // Incluir: mes actual, futuros, y el mes anterior si hay algo no pagado
-        if(pk>=todayPK) return true;
-        const entries=Object.values(cardMonths[pk]);
-        return entries.some(e=>!e.paid);
-      })
-      .sort();
-
-    if(relevantPKs.length>0){
-      wrap.appendChild(h('div',{class:'sec-label'},'Compromisos en tarjetas'));
-
-      relevantPKs.forEach(pk=>{
-        const entries=Object.values(cardMonths[pk]);
-        const monthTotal=entries.reduce((s,e)=>s+e.movs.reduce((ss,m)=>ss+m.amount,0),0);
-        const allPaid=entries.every(e=>e.paid);
-        const someUnpaid=entries.some(e=>!e.paid);
-        const label=monthLabel(pk);
-        const isPast=pk<todayPK;
-
-        const block=h('div',{class:'card card-pad',style:{marginBottom:'10px',opacity:allPaid?'0.65':'1'}});
-
-        // Header del mes
-        const mHdr=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'10px'}});
-        mHdr.innerHTML=`<div>
-          <span style="font-size:13px;font-weight:800;color:${G.text}">${label}</span>
-          ${isPast&&!allPaid?`<span style="font-size:10px;background:${G.redDim};color:${G.red};border:1px solid ${G.red}33;border-radius:5px;padding:1px 6px;font-weight:700;margin-left:6px">Pendiente</span>`:''}
-          ${allPaid?`<span style="font-size:10px;background:${G.greenDim};color:${G.green};border:1px solid ${G.green}33;border-radius:5px;padding:1px 6px;font-weight:700;margin-left:6px">✓ Todo pagado</span>`:''}
-        </div>
-        <span class="mono" style="font-size:16px;font-weight:800;color:${allPaid?G.green:G.text}">${fmt(monthTotal)}</span>`;
-        block.appendChild(mHdr);
-
-        // Una fila por tarjeta
-        entries.forEach(({card,movs,paid,closed})=>{
-          const cardTotal=movs.reduce((s,m)=>s+m.amount,0);
-
-          // Buscar fecha de vencimiento guardada
-          const dueKey=`dueDate_${card.id}_${pk}`;
-          const savedDue=DB.cardDueDates?.[dueKey]||'';
-          const diffDays=savedDue?Math.ceil((new Date(savedDue+'T12:00:00')-new Date())/86400000):null;
-
-          const row=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'8px 0',borderTop:`1px solid ${G.border}`}});
-
-          // Color dot de la tarjeta
-          row.appendChild(h('div',{style:{width:'8px',height:'8px',borderRadius:'50%',background:card.color,flexShrink:0}}));
-
-          const info=h('div',{style:{flex:1,minWidth:0}});
-          let dueLabel='';
-          if(savedDue){
-            let dl='';
-            if(diffDays<0) dl=`<span style="color:${G.red};font-weight:700">¡Vencida!</span>`;
-            else if(diffDays===0) dl=`<span style="color:${G.red};font-weight:700">¡Hoy!</span>`;
-            else if(diffDays===1) dl=`<span style="color:${G.yellow};font-weight:600">Mañana</span>`;
-            else dl=`<span style="color:${G.muted}">Vence en ${diffDays}d</span>`;
-            dueLabel=dl;
-          }
-          info.innerHTML=`<div style="font-size:13px;font-weight:700;color:${card.color}">${card.name}
-            ${paid?`<span style="font-size:10px;background:${G.greenDim};color:${G.green};border-radius:4px;padding:1px 5px;font-weight:700;margin-left:4px">✓ Pagado</span>`:''}
-            ${closed&&!paid?`<span style="font-size:10px;background:${G.yellowDim};color:${G.yellow};border-radius:4px;padding:1px 5px;font-weight:700;margin-left:4px">🔒</span>`:''}
-          </div>
-          <div style="font-size:11px;color:${G.muted};margin-top:1px">${movs.length} gasto${movs.length!==1?'s':''}${savedDue?' · '+dueLabel:''}</div>`;
-
-          // Barra de progreso (pagado vs pendiente)
-          if(!paid){
-            const barWrap=h('div',{style:{height:'3px',background:G.border,borderRadius:'2px',marginTop:'4px',overflow:'hidden'}});
-            barWrap.appendChild(h('div',{style:{height:'100%',width:'0%',background:card.color,borderRadius:'2px'}}));
-            info.appendChild(barWrap);
-          }
-
-          const amtDiv=h('div',{style:{textAlign:'right',flexShrink:0}});
-          amtDiv.innerHTML=`<div class="mono" style="font-size:13px;font-weight:700;color:${paid?G.green:card.color}">${fmt(cardTotal,card.currency)}</div>`;
-          row.append(info,amtDiv);
-          block.appendChild(row);
-        });
-
-        wrap.appendChild(block);
-      });
-    }
-  }
-
   const upcoming = DB.dues.filter(d=>{
     if(d.paid)return false;
     const diff=(new Date(d.dueDate)-now)/86400000;
@@ -2383,9 +2276,8 @@ function inversiones() {
   fab.style.display='flex';
   fab.onclick=()=>openNuevaInversion(renderList);
 
-  // ── Nueva inversión ──────────────────────────────────────────────────────
   function openNuevaInversion(onSave) {
-    let f={name:'',type:TIPOS[0],liquidity:LIQUIDEZ[0],initialAmount:'',currentAmount:'',currency:'ARS',color:INV_COLORS[0],notes:''};
+    let f={name:'',type:TIPOS[0],liquidity:LIQUIDEZ[0],initialAmount:'',currentAmount:'',currency:'ARS',color:INV_COLORS[0],notes:'',accountId:''};
     const body=h('div');
     function rb(){
       body.innerHTML='';
@@ -2398,10 +2290,10 @@ function inversiones() {
       tc.appendChild(h('div',{class:'col-2'},[makeField('Monto inicial',ii)]));
       tc.appendChild(makeField('Moneda',makeSelect([['ARS','ARS $'],['USD','USD $']],f.currency,v=>f.currency=v)));
       body.appendChild(tc);
-      // Valor actual (puede ser distinto si ya tiene rendimiento)
       const ci=makeInput({type:'number',placeholder:'Valor actual',value:f.currentAmount}); ci.oninput=e=>f.currentAmount=e.target.value;
       body.appendChild(makeField('Valor actual (si ya tiene rendimiento)',ci));
-      // Color
+      const accSel=makeSelect([['','Sin descontar de cuenta'],...DB.accounts.map(a=>[a.id,`${a.icon||'🏦'} ${a.name} (${fmt(a.balance,a.currency)})`])],f.accountId,v=>f.accountId=v);
+      body.appendChild(makeField('Descontar de cuenta',accSel));
       const cg=h('div',{class:'color-grid'});
       INV_COLORS.forEach(c=>{ const d=h('div',{class:'color-dot'+(f.color===c?' selected':''),style:{background:c},onClick:()=>{ f.color=c; rb(); }}); cg.appendChild(d); });
       body.appendChild(makeField('Color',cg));
@@ -2411,7 +2303,12 @@ function inversiones() {
       br.appendChild(makeBtn('Cancelar',closeModal,'ghost'));
       br.appendChild(makeBtn('Guardar',()=>{
         if(!f.name||!f.initialAmount)return;
-        DB.inversiones.push({...f,id:uid(),initialAmount:Number(f.initialAmount),currentAmount:Number(f.currentAmount||f.initialAmount),lastUpdated:today()});
+        const monto=Number(f.initialAmount);
+        DB.inversiones.push({...f,id:uid(),initialAmount:monto,currentAmount:Number(f.currentAmount||f.initialAmount),lastUpdated:today()});
+        if(f.accountId){
+          DB.accounts=DB.accounts.map(a=>a.id===f.accountId?{...a,balance:a.balance-monto}:a);
+          DB.movements.push({id:uid(),type:'gasto',description:`Inversión: ${f.name}`,amount:monto,currency:f.currency,date:today(),accountId:f.accountId,categoryId:''});
+        }
         saveDB(DB); closeModal(); onSave();
       },'primary',{full:true}));
       body.appendChild(br);
@@ -2450,7 +2347,7 @@ function inversiones() {
     </div>`;
     const ei=makeInput({type:'number',placeholder:'¿Cuánto más invertís?'}); ei.oninput=e=>extra=e.target.value;
     body.appendChild(makeField('Monto adicional',ei));
-    const accSel=makeSelect([['','Sin descontar de cuenta'],...DB.accounts.map(a=>[a.id,`${a.name} (${fmt(a.balance,a.currency)})`])],'',v=>selectedAcc=v);
+    const accSel=makeSelect([['','Sin descontar de cuenta'],...DB.accounts.map(a=>[a.id,`${a.icon||'🏦'} ${a.name} (${fmt(a.balance,a.currency)})`])],'',v=>selectedAcc=v);
     body.appendChild(makeField('Descontar de cuenta',accSel));
     const br=h('div',{class:'btn-row'});
     br.appendChild(makeBtn('Cancelar',closeModal,'ghost'));
@@ -2484,7 +2381,7 @@ function inversiones() {
     </div>`;
     const mi=makeInput({type:'number',placeholder:'Monto a rescatar',value:inv.currentAmount}); mi.oninput=e=>monto=e.target.value;
     body.appendChild(makeField('Monto a rescatar',mi));
-    const accSel=makeSelect([['','No acreditar en cuenta'],...DB.accounts.map(a=>[a.id,`${a.name} (${fmt(a.balance,a.currency)})`])],'',v=>selectedAcc=v);
+    const accSel=makeSelect([['','No acreditar en cuenta'],...DB.accounts.map(a=>[a.id,`${a.icon||'🏦'} ${a.name} (${fmt(a.balance,a.currency)})`])],'',v=>selectedAcc=v);
     body.appendChild(makeField('Acreditar en cuenta',accSel));
     const br=h('div',{class:'btn-row'});
     br.appendChild(makeBtn('Cancelar',closeModal,'ghost'));
