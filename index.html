@@ -786,16 +786,13 @@ function openMovForm(onSave) {
       const cuotaInp=makeInput({type:'number',min:'1',max:'48',value:form.installments});
       cuotaInp.oninput=e=>{ form.installments=e.target.value; };
       body.appendChild(makeField('Cuotas',cuotaInp));
-      // Indicador de período de imputación
       const card=DB.cards.find(c=>c.id===form.cardId);
       if(card&&form.date){
-        const ip=imputPeriodForDate(card,form.date);
-        const per=buildPeriodFromKey(card,ip);
-        const isClosedOrPaid=DB.cardPayments?.some(p=>p.cardId===card.id&&p.periodKey===ip);
-        const infoDiv=h('div',{style:{background:isClosedOrPaid?G.yellowDim:G.accentDim,border:`1px solid ${isClosedOrPaid?G.yellow:G.accent}33`,borderRadius:'9px',padding:'9px 12px',fontSize:'12px',marginBottom:'4px'}});
-        infoDiv.innerHTML=`<span style="color:${G.muted}">Se imputa al resumen </span><strong style="color:${isClosedOrPaid?G.yellow:card.color}">${per.label}</strong>
-          <span style="color:${G.muted}"> (${fmtDate(per.start)} → ${fmtDate(per.end)})</span>
-          ${isClosedOrPaid?`<div style="color:${G.yellow};font-size:11px;margin-top:3px;font-weight:600">⚠️ Este período ya está cerrado/pagado</div>`:''}`;
+        const ip=_imputPK(card,form.date);
+        const per=_periodOf(card,ip);
+        const isCP=DB.cardPayments?.some(p=>p.cardId===card.id&&p.periodKey===ip);
+        const infoDiv=h('div',{style:{background:isCP?G.yellowDim:G.accentDim,border:`1px solid ${isCP?G.yellow:G.accent}33`,borderRadius:'9px',padding:'9px 12px',fontSize:'12px',marginBottom:'4px'}});
+        infoDiv.innerHTML=`<span style="color:${G.muted}">Se imputa al resumen </span><strong style="color:${isCP?G.yellow:card.color}">${per.label}</strong><span style="color:${G.muted}"> (${fmtDate(per.start)} → ${fmtDate(per.end)})</span>${isCP?`<div style="color:${G.yellow};font-size:11px;margin-top:3px;font-weight:600">⚠️ Ese período ya está cerrado/pagado — el gasto irá de todas formas al resumen correcto</div>`:''}`;
         body.appendChild(infoDiv);
       }
     }
@@ -815,25 +812,24 @@ function openMovForm(onSave) {
 function saveMovimiento(form) {
   const base={...form,id:uid(),amount:Number(form.amount)};
   let newMovs=[...DB.movements];
-  if(Number(form.installments)>1&&form.cardId) {
+  if(Number(form.installments)>1&&form.cardId){
     const cuota=Math.round(base.amount/Number(form.installments));
     const card=DB.cards.find(c=>c.id===form.cardId);
     for(let i=0;i<Number(form.installments);i++){
       const d=new Date((form.date||today())+'T12:00:00'); d.setMonth(d.getMonth()+i);
       const movDate=d.toISOString().split('T')[0];
-      const imputPeriod=card?imputPeriodForDate(card,movDate):movDate.slice(0,7);
+      const imputPeriod=card?_imputPK(card,movDate):movDate.slice(0,7);
       newMovs.push({...base,id:uid(),amount:cuota,date:movDate,description:`${form.description} (${i+1}/${form.installments})`,installments:1,pendingCard:true,imputPeriod});
     }
   } else {
     if(form.cardId&&form.type==='gasto'){
       const card=DB.cards.find(c=>c.id===form.cardId);
-      if(card){base.imputPeriod=imputPeriodForDate(card,form.date||today());}
+      if(card) base.imputPeriod=_imputPK(card,form.date||today());
       base.pendingCard=true;
     }
     newMovs.push(base);
   }
-  // Solo afecta saldo de cuenta si NO es gasto con tarjeta
-  if(form.accountId && !(form.cardId && form.type==='gasto')){
+  if(form.accountId&&!(form.cardId&&form.type==='gasto')){
     const delta=form.type==='ingreso'?base.amount:-base.amount;
     DB.accounts=DB.accounts.map(a=>a.id===form.accountId?{...a,balance:a.balance+delta}:a);
   }
@@ -919,44 +915,33 @@ function openEditMovForm(original, onSave) {
 }
 
 // ─── TARJETAS & CUENTAS ──────────────────────────────────────────────────────
-// Retorna el periodKey ("YYYY-MM") al que se imputa una compra según día de cierre.
-// Si la fecha cae DESPUÉS del día de cierre → va al resumen del mes siguiente.
-function imputPeriodForDate(card, dateStr) {
-  const cd = card.closingDay || 20;
-  const d = new Date((dateStr||today()) + 'T12:00:00');
-  let y = d.getFullYear(), m = d.getMonth() + 1;
-  if (d.getDate() > cd) { m++; if (m > 12) { m = 1; y++; } }
+function _imputPK(card, dateStr) {
+  const cd=card.closingDay||20, d=new Date((dateStr||today())+'T12:00:00');
+  let y=d.getFullYear(), m=d.getMonth()+1;
+  if(d.getDate()>cd){m++;if(m>12){m=1;y++;}}
   return `${y}-${String(m).padStart(2,'0')}`;
 }
-
-function buildPeriodFromKey(card, pk) {
-  const [y, m] = pk.split('-').map(Number);
-  const cd = card.closingDay || 20;
-  const dd = card.dueDay || 10;
+function _periodOf(card, pk) {
+  const [y,m]=pk.split('-').map(Number), cd=card.closingDay||20, dd=card.dueDay||10;
   return {
-    start:   new Date(y, m-2, cd+1).toISOString().split('T')[0],
-    end:     new Date(y, m-1, cd).toISOString().split('T')[0],
-    dueDate: new Date(y, m, dd).toISOString().split('T')[0],
-    label: monthLabel(pk), periodKey: pk
+    start:   new Date(y,m-2,cd+1).toISOString().split('T')[0],
+    end:     new Date(y,m-1,cd).toISOString().split('T')[0],
+    dueDate: new Date(y,m,dd).toISOString().split('T')[0],
+    label:monthLabel(pk), periodKey:pk
   };
 }
-
 function getCardPeriod(card, refDate) {
-  const ref = refDate ? new Date(refDate + 'T12:00:00') : new Date();
-  const cd = card.closingDay || 20;
-  let y = ref.getFullYear(), m = ref.getMonth() + 1;
-  if (ref.getDate() > cd) { m++; if (m > 12) { m = 1; y++; } }
-  return buildPeriodFromKey(card, `${y}-${String(m).padStart(2,'0')}`);
+  const ref=refDate?new Date(refDate+'T12:00:00'):new Date(), cd=card.closingDay||20;
+  let y=ref.getFullYear(), m=ref.getMonth()+1;
+  if(ref.getDate()>cd){m++;if(m>12){m=1;y++;}}
+  return _periodOf(card,`${y}-${String(m).padStart(2,'0')}`);
 }
-
-// Retorna el imputPeriod de un movimiento (fallback a fecha si no tiene el campo)
-function movImputPK(mov) {
-  if (mov.imputPeriod) return mov.imputPeriod;
-  const card = DB.cards.find(c => c.id === mov.cardId);
-  return card ? imputPeriodForDate(card, mov.date) : mov.date.slice(0, 7);
+function _movPK(mov){
+  if(mov.imputPeriod)return mov.imputPeriod;
+  const card=DB.cards.find(c=>c.id===mov.cardId);
+  return card?_imputPK(card,mov.date):mov.date.slice(0,7);
 }
-
-const _cardNavPK = {}; // período navegado por tarjeta
+const _cnav={};
 
 function tarjetas() {
   const wrap=h('div');
@@ -968,33 +953,37 @@ function tarjetas() {
   function renderSub() {
     listArea.innerHTML='';
     if(subTab==='tarjetas') {
-      if(DB.cards.length===0) listArea.appendChild(makeCard(h('div',{class:'empty'},'Aún no tenés tarjetas. ¡Agregá la primera!')));
+      if(DB.cards.length===0) listArea.appendChild(makeCard(h('div',{class:'empty'},'Aún no tenés tarjetas.')));
       DB.cards.forEach(card=>{
         const curPK=getCardPeriod(card).periodKey;
-        if(!_cardNavPK[card.id]) _cardNavPK[card.id]=curPK;
-        const viewPK=_cardNavPK[card.id];
-        const period=buildPeriodFromKey(card,viewPK);
+        if(!_cnav[card.id]) _cnav[card.id]=curPK;
+        const viewPK=_cnav[card.id];
+        const period=_periodOf(card,viewPK);
 
-        // Movimientos imputados a este período
-        const periodMovs=DB.movements.filter(m=>m.cardId===card.id&&m.type==='gasto'&&movImputPK(m)===viewPK);
+        const periodMovs=DB.movements.filter(m=>m.cardId===card.id&&m.type==='gasto'&&_movPK(m)===viewPK);
         const periodTotal=periodMovs.reduce((s,m)=>s+m.amount,0);
 
-        // Futuros agrupados por período
+        // pagos parciales ya registrados para este período
+        const periodPayments=(DB.cardPayments||[]).filter(p=>p.cardId===card.id&&p.periodKey===viewPK&&!p.closedOnly);
+        const totalPagado=periodPayments.reduce((s,p)=>s+(p.amount||0),0);
+        const saldo=periodTotal-totalPagado;
+
+        const alreadyClosed=(DB.cardPayments||[]).some(p=>p.cardId===card.id&&p.periodKey===viewPK&&p.closedOnly);
+        const alreadyPaid=saldo<=0&&periodTotal>0;
+
         const futureMap={};
         DB.movements.filter(m=>m.cardId===card.id&&m.type==='gasto').forEach(m=>{
-          const ip=movImputPK(m); if(ip>curPK){if(!futureMap[ip])futureMap[ip]=[]; futureMap[ip].push(m);}
+          const ip=_movPK(m); if(ip>curPK){if(!futureMap[ip])futureMap[ip]=[]; futureMap[ip].push(m);}
         });
         const futurePending=Object.values(futureMap).flat().reduce((s,m)=>s+m.amount,0);
 
-        const alreadyPaid=DB.cardPayments?.some(p=>p.cardId===card.id&&p.periodKey===viewPK&&!p.closedOnly);
-        const alreadyClosed=!alreadyPaid&&DB.cardPayments?.some(p=>p.cardId===card.id&&p.periodKey===viewPK&&p.closedOnly);
         const pct=card.limit?Math.min(periodTotal/card.limit*100,100):0;
         const isLatest=viewPK>=curPK;
 
         const c=h('div',{class:'card card-pad',style:{marginBottom:'12px',border:`1.5px solid ${card.color}33`,position:'relative',overflow:'hidden'}});
         c.appendChild(h('div',{style:{position:'absolute',top:'-25px',right:'-25px',width:'100px',height:'100px',borderRadius:'50%',background:`${card.color}0f`}}));
 
-        // ── Header ──
+        // Header
         const hdr=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:'10px',position:'relative',zIndex:1}});
         const hdrL=h('div');
         hdrL.innerHTML=`<div style="font-weight:800;font-size:17px;color:${card.color}">${card.name}</div>
@@ -1004,7 +993,7 @@ function tarjetas() {
         hdrR.appendChild(makeDelBtn(()=>{DB.cards=DB.cards.filter(x=>x.id!==card.id);saveDB(DB);renderSub();}));
         hdr.append(hdrL,hdrR); c.appendChild(hdr);
 
-        // ── Navegación ‹ Mes › ──
+        // Navegación ‹ Mes ›
         const navRow=h('div',{style:{display:'flex',alignItems:'center',gap:'6px',marginBottom:'10px'}});
         const pBtn=h('button',{style:{width:'32px',height:'32px',borderRadius:'8px',border:`1.5px solid ${card.color}33`,background:card.color+'10',color:card.color,fontSize:'18px',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}},'‹');
         const nBtn=h('button',{style:{width:'32px',height:'32px',borderRadius:'8px',border:`1.5px solid ${card.color}33`,background:card.color+'10',color:card.color,fontSize:'18px',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,opacity:isLatest?'0.3':'1',cursor:isLatest?'default':'pointer'}},'›');
@@ -1017,24 +1006,39 @@ function tarjetas() {
         const pLbl=h('div',{style:{flex:1,textAlign:'center'}});
         pLbl.innerHTML=`<div style="font-size:13px;font-weight:800;color:${card.color}">${period.label}${stag}</div>
           <div style="font-size:10px;color:${G.muted};margin-top:1px">${fmtDate(period.start)} → ${fmtDate(period.end)}</div>`;
-        pBtn.onclick=()=>{const[y,m]=viewPK.split('-').map(Number),d=new Date(y,m-2,1);_cardNavPK[card.id]=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;renderSub();};
-        nBtn.onclick=()=>{if(isLatest)return;const[y,m]=viewPK.split('-').map(Number),d=new Date(y,m,1);_cardNavPK[card.id]=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;renderSub();};
+        pBtn.onclick=()=>{const[y,m]=viewPK.split('-').map(Number),d=new Date(y,m-2,1);_cnav[card.id]=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;renderSub();};
+        nBtn.onclick=()=>{if(isLatest)return;const[y,m]=viewPK.split('-').map(Number),d=new Date(y,m,1);_cnav[card.id]=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;renderSub();};
         navRow.append(pBtn,pLbl,nBtn); c.appendChild(navRow);
 
-        // ── Resumen box ──
+        // Resumen box
         const resBox=h('div',{style:{background:`${card.color}0a`,border:`1px solid ${card.color}22`,borderRadius:'12px',padding:'12px',marginBottom:'10px'}});
-        resBox.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <span style="font-size:12px;color:${G.textSoft}">${periodMovs.length} gasto${periodMovs.length!==1?'s':''}</span>
-          <span class="mono" style="font-size:22px;font-weight:700;color:${card.color}">${fmt(periodTotal,card.currency)}</span></div>`;
+
+        // Total + saldo
+        const totRow=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'6px'}});
+        totRow.innerHTML=`<span style="font-size:12px;color:${G.textSoft}">${periodMovs.length} gasto${periodMovs.length!==1?'s':''}</span>
+          <span class="mono" style="font-size:22px;font-weight:700;color:${card.color}">${fmt(periodTotal,card.currency)}</span>`;
+        resBox.appendChild(totRow);
+
+        // Si hay pagos parciales, mostrar desglose
+        if(totalPagado>0&&!alreadyPaid){
+          const saldoRow=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 0',borderTop:`1px solid ${card.color}22`,marginTop:'4px'}});
+          saldoRow.innerHTML=`<span style="font-size:11px;color:${G.green};font-weight:600">✓ Pagado</span><span class="mono" style="font-size:13px;color:${G.green};font-weight:700">${fmt(totalPagado,card.currency)}</span>`;
+          resBox.appendChild(saldoRow);
+          const pendRow=h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center'}});
+          pendRow.innerHTML=`<span style="font-size:11px;color:${G.red};font-weight:700">Saldo pendiente</span><span class="mono" style="font-size:16px;color:${G.red};font-weight:800">${fmt(saldo,card.currency)}</span>`;
+          resBox.appendChild(pendRow);
+        }
+
         if(card.limit>0){
-          resBox.innerHTML+=`<div style="display:flex;justify-content:space-between;margin-bottom:3px"><span style="font-size:10px;color:${G.muted}">Límite utilizado</span><span class="mono" style="font-size:10px;color:${pct>80?G.red:G.muted};font-weight:600">${Math.round(pct)}% de ${fmt(card.limit)}</span></div>
+          resBox.innerHTML+=`<div style="display:flex;justify-content:space-between;margin-top:6px;margin-bottom:3px"><span style="font-size:10px;color:${G.muted}">Límite utilizado</span><span class="mono" style="font-size:10px;color:${pct>80?G.red:G.muted};font-weight:600">${Math.round(pct)}% de ${fmt(card.limit)}</span></div>
           <div class="progress-bg"><div class="progress-fill" style="width:${pct}%;background:${pct>80?G.red:card.color}"></div></div>`;
         }
 
-        // Fecha de vencimiento — auto desde dueDay, editable
+        // Fecha de vencimiento
         const dueKey=`dueDate_${card.id}_${viewPK}`;
         if(!DB.cardDueDates)DB.cardDueDates={};
-        const savedDue=DB.cardDueDates[dueKey]||(()=>{const v=buildPeriodFromKey(card,viewPK).dueDate;if(v)DB.cardDueDates[dueKey]=v;return v;})();
+        const autoDue=_periodOf(card,viewPK).dueDate;
+        const savedDue=DB.cardDueDates[dueKey]||(DB.cardDueDates[dueKey]=autoDue,autoDue)||'';
         const vRow=h('div',{style:{display:'flex',alignItems:'center',gap:'7px',marginTop:'8px',paddingTop:'8px',borderTop:`1px solid ${card.color}22`,flexWrap:'wrap'}});
         vRow.innerHTML=`<span style="font-size:11px;color:${G.muted};font-weight:600;flex-shrink:0">📅 Vence:</span>`;
         const dInp=h('input',{type:'date',value:savedDue||'',style:{flex:1,minWidth:'110px',border:`1.5px solid ${card.color}33`,borderRadius:'8px',padding:'4px 8px',fontSize:'12px',color:G.text,background:'#fff',fontFamily:'inherit'}});
@@ -1051,7 +1055,17 @@ function tarjetas() {
         resBox.appendChild(vRow);
         c.appendChild(resBox);
 
-        // ── Lista de gastos editable ──
+        // Historial de pagos parciales
+        if(periodPayments.length>0){
+          const phWrap=h('div',{style:{background:G.greenDim,borderRadius:'9px',padding:'8px 12px',marginBottom:'8px'}});
+          phWrap.innerHTML=`<div style="font-size:11px;font-weight:700;color:${G.green};margin-bottom:4px">Pagos registrados</div>`;
+          periodPayments.forEach(p=>{
+            phWrap.innerHTML+=`<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0"><span style="color:${G.textSoft}">${fmtDate(p.paidAt||p.closedAt||'')}${p.accountName?` · ${p.accountName}`:''}</span><span class="mono" style="font-weight:700;color:${G.green}">${fmt(p.amount,card.currency)}</span></div>`;
+          });
+          c.appendChild(phWrap);
+        }
+
+        // Lista de gastos editable
         if(periodMovs.length>0){
           const detWrap=h('div',{style:{display:'none',marginBottom:'8px'}});
           function renderDet(){
@@ -1078,17 +1092,18 @@ function tarjetas() {
           c.appendChild(togBtn); c.appendChild(detWrap);
         }
 
-        // ── Acciones ──
-        if(!alreadyPaid&&periodTotal>0){
+        // Botones de acción
+        if(periodTotal>0&&!alreadyPaid){
           const actRow=h('div',{style:{display:'flex',gap:'8px',marginTop:'4px'}});
           if(!alreadyClosed){
             actRow.appendChild(h('button',{style:{flex:1,background:G.yellowDim,color:G.yellow,border:`1.5px solid ${G.yellow}55`,borderRadius:'10px',padding:'10px',fontWeight:700,fontSize:'13px',cursor:'pointer'},onClick:()=>openCerrarPeriodo(card,periodMovs,periodTotal,period,renderSub)},'🔒 Cerrar'));
           }
-          actRow.appendChild(h('button',{style:{flex:2,background:`linear-gradient(135deg,${card.color},${card.color}cc)`,color:'#fff',border:'none',borderRadius:'10px',padding:'10px',fontWeight:800,fontSize:'13px',cursor:'pointer',boxShadow:`0 3px 12px ${card.color}44`},onClick:()=>openPagarResumen(card,periodMovs,periodTotal,period,renderSub)},'💳 Pagar resumen'));
+          const payLabel=totalPagado>0?`💳 Pagar saldo (${fmt(saldo,card.currency)})`:'💳 Pagar resumen';
+          actRow.appendChild(h('button',{style:{flex:2,background:`linear-gradient(135deg,${card.color},${card.color}cc)`,color:'#fff',border:'none',borderRadius:'10px',padding:'10px',fontWeight:800,fontSize:'13px',cursor:'pointer',boxShadow:`0 3px 12px ${card.color}44`},onClick:()=>openPagarResumen(card,periodMovs,periodTotal,saldo,period,renderSub)},payLabel));
           c.appendChild(actRow);
         }
 
-        // ── Cuotas futuras ──
+        // Cuotas futuras
         if(futurePending>0){
           const futDiv=h('div',{style:{background:G.yellowDim,borderRadius:'9px',padding:'10px 12px',marginTop:'10px'}});
           const futKeys=Object.keys(futureMap).sort();
@@ -1101,9 +1116,9 @@ function tarjetas() {
             movs.forEach(m=>{const cat=DB.categories.find(x=>x.id===m.categoryId);blk.innerHTML+=`<div style="display:flex;justify-content:space-between;font-size:11px;color:${G.muted};padding:2px 0"><span>${cat?.icon||'📦'} ${m.description||'Gasto'}</span><span class="mono">${fmt(m.amount,m.currency||card.currency)}</span></div>`;});
             futDet.appendChild(blk);
           });
-          const togF=h('button',{style:{fontSize:'11px',color:G.yellow,fontWeight:700,background:'none',border:'none',cursor:'pointer',width:'100%',textAlign:'left',marginTop:'2px'}},'▶ Ver detalle por resumen');
+          const togF=h('button',{style:{fontSize:'11px',color:G.yellow,fontWeight:700,background:'none',border:'none',cursor:'pointer',width:'100%',textAlign:'left',marginTop:'2px'}},'▶ Ver detalle');
           let fOpen=false;
-          togF.onclick=()=>{fOpen=!fOpen;futDet.style.display=fOpen?'block':'none';togF.textContent=fOpen?'▼ Ocultar detalle':'▶ Ver detalle por resumen';};
+          togF.onclick=()=>{fOpen=!fOpen;futDet.style.display=fOpen?'block':'none';togF.textContent=fOpen?'▼ Ocultar':'▶ Ver detalle';};
           futDiv.append(togF,futDet); c.appendChild(futDiv);
         }
 
@@ -1332,14 +1347,7 @@ function tarjetas() {
           const imputPeriod=`${pm.getFullYear()}-${String(pm.getMonth()+1).padStart(2,'0')}`;
           const symDay=Math.min(cd,new Date(pm.getFullYear(),pm.getMonth()+1,0).getDate());
           const d=new Date(pm.getFullYear(),pm.getMonth(),symDay);
-          DB.movements.push({
-            id:uid(),type:'gasto',description:`${f.description} (${i+1}/${n})`,
-            amount:cuota,currency:f.currency,
-            date:d.toISOString().split('T')[0],
-            cardId:f.cardId,categoryId:f.categoryId,
-            installmentGroupId:groupId,installmentNum:i+1,installmentTotal:n,
-            pendingCard:true,imputPeriod
-          });
+          DB.movements.push({id:uid(),type:'gasto',description:`${f.description} (${i+1}/${n})`,amount:cuota,currency:f.currency,date:d.toISOString().split('T')[0],cardId:f.cardId,categoryId:f.categoryId,installmentGroupId:groupId,installmentNum:i+1,installmentTotal:n,pendingCard:true,imputPeriod});
         }
         DB.installmentGroups.push({id:groupId,description:f.description,totalAmount:Number(f.totalAmount),installments:n,cardId:f.cardId,currency:f.currency,createdAt:today()});
         saveDB(DB);
@@ -1714,22 +1722,21 @@ function openEditCardMov(mov, card, onDone) {
     const dateInp=makeInput({type:'date',value:f.date}); dateInp.oninput=e=>{f.date=e.target.value;rb();};
     body.appendChild(makeField('Fecha de compra',dateInp));
     if(f.date){
-      const ip=imputPeriodForDate(card,f.date);
-      const per=buildPeriodFromKey(card,ip);
-      const infoDiv=h('div',{style:{background:card.color+'12',borderRadius:'9px',padding:'8px 12px',fontSize:'12px',color:G.textSoft,marginBottom:'4px'}});
-      infoDiv.innerHTML=`📋 Se imputa al resumen <strong style="color:${card.color}">${per.label}</strong> (${fmtDate(per.start)} → ${fmtDate(per.end)})`;
-      body.appendChild(infoDiv);
+      const ip=_imputPK(card,f.date), per=_periodOf(card,ip);
+      const info=h('div',{style:{background:card.color+'12',borderRadius:'9px',padding:'8px 12px',fontSize:'12px',color:G.textSoft,marginBottom:'4px'}});
+      info.innerHTML=`📋 Resumen <strong style="color:${card.color}">${per.label}</strong> (${fmtDate(per.start)} → ${fmtDate(per.end)})`;
+      body.appendChild(info);
     }
     const cats=DB.categories.filter(c=>c.type==='gasto'||c.type==='ambos');
-    const catField=h('div',{class:'field'},[h('label',{class:'field-label'},'Categoría')]);
-    const catGrid=h('div',{class:'cat-grid'});
-    cats.forEach(cat=>{const btn=h('button',{class:'cat-pick-btn'+(f.categoryId===cat.id?' selected':''),style:{color:cat.color,background:f.categoryId===cat.id?cat.color+'18':'#f8fafc',borderColor:f.categoryId===cat.id?cat.color:G.border},onClick:()=>{f.categoryId=cat.id;rb();}},`${cat.icon} ${cat.name}`);catGrid.appendChild(btn);});
-    catField.appendChild(catGrid); body.appendChild(catField);
+    const cf=h('div',{class:'field'},[h('label',{class:'field-label'},'Categoría')]);
+    const cg=h('div',{class:'cat-grid'});
+    cats.forEach(cat=>{const btn=h('button',{class:'cat-pick-btn'+(f.categoryId===cat.id?' selected':''),style:{color:cat.color,background:f.categoryId===cat.id?cat.color+'18':'#f8fafc',borderColor:f.categoryId===cat.id?cat.color:G.border},onClick:()=>{f.categoryId=cat.id;rb();}},`${cat.icon} ${cat.name}`);cg.appendChild(btn);});
+    cf.appendChild(cg); body.appendChild(cf);
     const br=h('div',{class:'btn-row'});
     br.appendChild(makeBtn('Cancelar',closeModal,'ghost'));
     br.appendChild(makeBtn('Guardar',()=>{
       if(!f.amount||!f.date)return;
-      DB.movements=DB.movements.map(x=>x.id===mov.id?{...x,description:f.description,amount:Number(f.amount),date:f.date,currency:f.currency,categoryId:f.categoryId,imputPeriod:imputPeriodForDate(card,f.date)}:x);
+      DB.movements=DB.movements.map(x=>x.id===mov.id?{...x,description:f.description,amount:Number(f.amount),date:f.date,currency:f.currency,categoryId:f.categoryId,imputPeriod:_imputPK(card,f.date)}:x);
       saveDB(DB);closeModal();onDone();
     },'primary',{full:true}));
     body.appendChild(br);
@@ -1738,27 +1745,30 @@ function openEditCardMov(mov, card, onDone) {
   openModal(`Editar gasto · ${card.name}`,body);
 }
 
-// ── Cerrar período sin pagar ──────────────────────────────────────────────
+// ── Cerrar período (congela el resumen, no registra pago) ─────────────────
 function openCerrarPeriodo(card, periodMovs, totalAmount, period, onDone) {
   const body=h('div');
   body.innerHTML=`<div style="text-align:center;margin-bottom:14px">
     <div style="font-size:32px;margin-bottom:6px">🔒</div>
     <div style="font-weight:800;font-size:20px;color:${card.color}">${fmt(totalAmount,card.currency)}</div>
     <div style="font-size:13px;color:${G.muted};margin-top:4px">Cerrar resumen ${period.label} · ${card.name}</div></div>
-    <div style="background:${G.yellowDim};border-radius:10px;padding:10px 12px;margin-bottom:14px;font-size:12px;color:${G.yellow};line-height:1.6">
-    Cerrar el período congela el resumen: no entra ningún gasto más. Los nuevos gastos irán al período siguiente. Cuando lo pagues, usá el botón Pagar.</div>`;
-  const listBox=h('div',{style:{background:G.accentDim,borderRadius:'10px',padding:'10px 12px',marginBottom:'14px',maxHeight:'160px',overflowY:'auto'}});
-  listBox.innerHTML=`<div style="font-size:11px;font-weight:700;color:${G.accent};margin-bottom:6px;text-transform:uppercase">${periodMovs.length} gastos incluidos</div>`;
+    <div style="background:${G.yellowDim};border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:${G.yellow};line-height:1.6">
+    🔒 <strong>Cerrar</strong> congela el resumen: no entran más gastos.<br>
+    💳 <strong>Pagar</strong> lo hacés después, cuando lo abonas desde la cuenta.</div>`;
+  const lb=h('div',{style:{background:G.accentDim,borderRadius:'10px',padding:'10px 12px',marginBottom:'14px',maxHeight:'160px',overflowY:'auto'}});
+  lb.innerHTML=`<div style="font-size:11px;font-weight:700;color:${G.accent};margin-bottom:6px;text-transform:uppercase">${periodMovs.length} gastos</div>`;
   [...periodMovs].sort((a,b)=>a.date.localeCompare(b.date)).forEach(m=>{
     const cat=DB.categories.find(x=>x.id===m.categoryId);
-    listBox.innerHTML+=`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid ${G.border};font-size:12px"><span style="color:${G.textSoft}">${cat?.icon||'📦'} ${m.description||'Gasto'}</span><span class="mono" style="font-weight:700;color:${G.red}">${fmt(m.amount,m.currency)}</span></div>`;
+    lb.innerHTML+=`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid ${G.border};font-size:12px"><span style="color:${G.textSoft}">${cat?.icon||'📦'} ${m.description||'Gasto'}</span><span class="mono" style="font-weight:700;color:${G.red}">${fmt(m.amount,m.currency)}</span></div>`;
   });
-  listBox.innerHTML+=`<div style="display:flex;justify-content:space-between;padding-top:7px;font-size:13px;font-weight:800"><span>Total</span><span class="mono" style="color:${card.color}">${fmt(totalAmount,card.currency)}</span></div>`;
-  body.appendChild(listBox);
+  lb.innerHTML+=`<div style="display:flex;justify-content:space-between;padding-top:7px;font-size:13px;font-weight:800"><span>Total</span><span class="mono" style="color:${card.color}">${fmt(totalAmount,card.currency)}</span></div>`;
+  body.appendChild(lb);
   const br=h('div',{class:'btn-row'});
   br.appendChild(makeBtn('Cancelar',closeModal,'ghost'));
   br.appendChild(makeBtn('🔒 Cerrar período',()=>{
     if(!DB.cardPayments)DB.cardPayments=[];
+    // Quitar cierre anterior si existía
+    DB.cardPayments=DB.cardPayments.filter(p=>!(p.cardId===card.id&&p.periodKey===period.periodKey&&p.closedOnly));
     DB.cardPayments.push({cardId:card.id,periodKey:period.periodKey,amount:totalAmount,closedAt:today(),closedOnly:true});
     saveDB(DB);closeModal();onDone();
   },'primary',{full:true}));
@@ -1766,85 +1776,79 @@ function openCerrarPeriodo(card, periodMovs, totalAmount, period, onDone) {
   openModal(`Cerrar resumen ${card.name}`,body);
 }
 
-// ── Modal: confirmar pago de resumen de tarjeta ────────────────────────────
-function openPagarResumen(card, periodMovs, totalAmount, period, onDone) {
+// ── Pagar resumen (permite pagos parciales, registra en cuenta) ────────────
+function openPagarResumen(card, periodMovs, totalAmount, saldoPendiente, period, onDone) {
   const body=h('div');
-
-  // Encabezado
-  const header=h('div',{style:{textAlign:'center',marginBottom:'16px'}});
-  header.innerHTML=`
+  body.innerHTML=`<div style="text-align:center;margin-bottom:14px">
     <div style="font-size:36px;margin-bottom:6px">💳</div>
-    <div style="font-weight:800;font-size:22px;color:${card.color}">${fmt(totalAmount)}</div>
-    <div style="font-size:13px;color:${G.muted};margin-top:4px">Resumen ${period.label} · ${card.name}</div>`;
-  body.appendChild(header);
+    <div style="font-weight:800;font-size:22px;color:${card.color}">${fmt(totalAmount,card.currency)}</div>
+    ${saldoPendiente<totalAmount?`<div style="font-size:13px;color:${G.red};font-weight:700;margin-top:2px">Saldo pendiente: ${fmt(saldoPendiente,card.currency)}</div>`:''}
+    <div style="font-size:13px;color:${G.muted};margin-top:4px">Resumen ${period.label} · ${card.name}</div></div>`;
 
-  // Lista de gastos que se van a registrar
-  const listBox=h('div',{style:{background:G.accentDim,borderRadius:'12px',padding:'10px 12px',marginBottom:'14px',maxHeight:'180px',overflowY:'auto'}});
-  const listTitle=h('div',{style:{fontSize:'11px',fontWeight:700,color:G.accent,marginBottom:'8px',textTransform:'uppercase',letterSpacing:'.5px'}});
-  listTitle.textContent=`${periodMovs.length} gastos que quedarán registrados`;
-  listBox.appendChild(listTitle);
+  // Lista de gastos
+  const lb=h('div',{style:{background:G.accentDim,borderRadius:'12px',padding:'10px 12px',marginBottom:'14px',maxHeight:'160px',overflowY:'auto'}});
+  lb.innerHTML=`<div style="font-size:11px;font-weight:700;color:${G.accent};margin-bottom:6px;text-transform:uppercase">${periodMovs.length} gastos del resumen</div>`;
   periodMovs.forEach(m=>{
     const cat=DB.categories.find(x=>x.id===m.categoryId);
-    const row=h('div',{style:{display:'flex',justifyContent:'space-between',padding:'5px 0',borderBottom:`1px solid ${G.border}`,fontSize:'12px'}});
-    row.innerHTML=`<span style="color:${G.textSoft}">${cat?.icon||'📦'} ${m.description||cat?.name||'Gasto'}</span>
-      <span class="mono" style="font-weight:700;color:${G.red}">${fmt(m.amount,m.currency)}</span>`;
-    listBox.appendChild(row);
+    lb.innerHTML+=`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid ${G.border};font-size:12px"><span style="color:${G.textSoft}">${cat?.icon||'📦'} ${m.description||cat?.name||'Gasto'}</span><span class="mono" style="font-weight:700;color:${G.red}">${fmt(m.amount,m.currency)}</span></div>`;
   });
-  // Total
-  const totalRow=h('div',{style:{display:'flex',justifyContent:'space-between',paddingTop:'8px',fontSize:'13px',fontWeight:800}});
-  totalRow.innerHTML=`<span>Total</span><span class="mono" style="color:${card.color}">${fmt(totalAmount,card.currency)}</span>`;
-  listBox.appendChild(totalRow);
-  body.appendChild(listBox);
+  lb.innerHTML+=`<div style="display:flex;justify-content:space-between;padding-top:8px;font-size:13px;font-weight:800"><span>Total resumen</span><span class="mono" style="color:${card.color}">${fmt(totalAmount,card.currency)}</span></div>`;
+  body.appendChild(lb);
 
-  // Fecha real de vencimiento de este resumen (editable)
-  const dueDateInp=makeInput({type:'date',value:today()});
-  body.appendChild(makeField('Fecha de vencimiento de este resumen',dueDateInp));
+  // Monto a pagar ahora (por defecto el saldo pendiente, editable para pagos parciales)
+  let montoPagar=String(saldoPendiente);
+  const mi=makeInput({type:'number',placeholder:'Monto a pagar',value:montoPagar});
+  mi.oninput=e=>montoPagar=e.target.value;
+  body.appendChild(makeField(`Monto a pagar ahora (saldo: ${fmt(saldoPendiente,card.currency)})`,mi));
+
+  // Fecha de pago
+  const payDateInp=makeInput({type:'date',value:today()});
+  body.appendChild(makeField('Fecha de pago',payDateInp));
 
   // Cuenta desde donde se paga
-  let selectedAcc='';
-  const accSel=makeSelect([['','Sin descontar de cuenta'],...DB.accounts.map(a=>[a.id,`${a.name} (${fmt(a.balance,a.currency)})`])],'',v=>{ selectedAcc=v; });
+  let selectedAcc='', selectedAccName='';
+  const accSel=makeSelect([['','Sin descontar de cuenta'],...DB.accounts.map(a=>[a.id,`${a.icon||'🏦'} ${a.name} (${fmt(a.balance,a.currency)})`])],'',v=>{
+    selectedAcc=v;
+    selectedAccName=v?DB.accounts.find(a=>a.id===v)?.name||'':'';
+  });
   body.appendChild(makeField('Pagar desde cuenta',accSel));
 
   const br=h('div',{class:'btn-row',style:{marginTop:'16px'}});
   br.appendChild(makeBtn('Cancelar',closeModal,'ghost'));
   br.appendChild(makeBtn('✓ Confirmar pago',()=>{
-    const payDate=dueDateInp.value||today();
+    const monto=Number(montoPagar||saldoPendiente);
+    if(!monto||monto<=0)return;
+    const payDate=payDateInp.value||today();
+    const esSaldoTotal=monto>=saldoPendiente;
 
-    // En vez de crear nuevos movimientos, simplemente "liberamos" las cuotas
-    // del período: quitamos el flag pendingCard y actualizamos fecha y cuenta
-    const periodIds=new Set(periodMovs.map(m=>m.id));
-    DB.movements=DB.movements.map(m=>{
-      if(!periodIds.has(m.id)) return m;
-      return {
-        ...m,
-        pendingCard:false,       // ya es real — aparece en historial y balance
-        date:payDate,            // fecha del pago real
-        accountId:selectedAcc||m.accountId||null,
-        cardPaymentRef:true      // marca que se registró al pagar tarjeta
-      };
+    // Registrar el pago (no como closedOnly)
+    if(!DB.cardPayments)DB.cardPayments=[];
+    DB.cardPayments.push({
+      cardId:card.id, periodKey:period.periodKey,
+      amount:monto, paidAt:payDate,
+      accountId:selectedAcc||null,
+      accountName:selectedAccName||null
     });
 
-    // Descontar total del saldo de la cuenta
-    if(selectedAcc){
-      DB.accounts=DB.accounts.map(a=>a.id===selectedAcc?{...a,balance:a.balance-totalAmount}:a);
+    // Si paga todo el saldo → liberar movimientos del pendingCard
+    if(esSaldoTotal){
+      const ids=new Set(periodMovs.map(m=>m.id));
+      DB.movements=DB.movements.map(m=>{
+        if(!ids.has(m.id))return m;
+        return {...m,pendingCard:false,accountId:selectedAcc||m.accountId||null,cardPaymentRef:true};
+      });
     }
 
-    // Marcar período como pagado
-    if(!DB.cardPayments) DB.cardPayments=[];
-    DB.cardPayments.push({
-      cardId:card.id,
-      periodKey:period.periodKey,
-      amount:totalAmount,
-      paidAt:today(),
-      dueDate:payDate
-    });
+    // Descontar de cuenta
+    if(selectedAcc){
+      DB.accounts=DB.accounts.map(a=>a.id===selectedAcc?{...a,balance:a.balance-monto}:a);
+      // Registrar movimiento de pago de tarjeta en historial
+      DB.movements.push({id:uid(),type:'gasto',description:`Pago tarjeta ${card.name} - ${period.label}`,amount:monto,currency:card.currency,date:payDate,accountId:selectedAcc,categoryId:'',cardPaymentEntry:true});
+    }
 
-    saveDB(DB);
-    closeModal();
-    onDone();
+    saveDB(DB); closeModal(); onDone();
   },'primary',{full:true}));
   body.appendChild(br);
-
   openModal(`Pagar resumen ${card.name}`,body);
 }
 
